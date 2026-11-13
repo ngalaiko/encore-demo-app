@@ -1,0 +1,1 @@
+curl /healthz --fail-with-body

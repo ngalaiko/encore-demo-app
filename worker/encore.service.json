@@ -1,0 +1,5 @@
+{
+  "name": "worker",
+  "lang": "python",
+  "docker": { "base_image": "python:3.14-slim-trixie" }
+}

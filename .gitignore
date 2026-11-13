@@ -1,0 +1,15 @@
+.encore/
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Encore
+/.encore
+/dist
+.secrets.user.toml
+*.user.config.*

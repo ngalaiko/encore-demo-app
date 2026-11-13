@@ -1,0 +1,6 @@
+{
+  "name": "jobs",
+  "lang": "python",
+  "docker": { "base_image": "python:3.14-slim-trixie" },
+  "api": [{ "type": "openapi", "spec": "openapi.yaml" }]
+}

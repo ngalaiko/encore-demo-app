@@ -1,0 +1,11 @@
+[project]
+name = "encore-demo-worker"
+version = "0.1.0"
+requires-python = ">=3.14"
+dependencies = ["encore-dev"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv.sources]
+encore-dev = { path = "/Users/nikita/Developer/encoredev/v2-encore/sdk/py/infra", editable = true }
