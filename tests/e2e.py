@@ -11,7 +11,7 @@ import urllib.request
 import uuid
 
 
-DEV_HOST = "staging-span-explorer-e2e-1112-8mfi.staging.encr.app"
+DEV_HOST = "staging-encore-demo-app-7bm2.encr.app"
 
 
 def checked_base(value):
