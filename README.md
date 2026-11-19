@@ -66,6 +66,24 @@ processing pass), `jobs.status_cache_hits`, `jobs.status_cache_misses`, and
 `encore-beta metrics get worker.job_attempts --since 5m` and
 `encore-beta metrics get worker.job_retries --since 5m`.
 
+## Trace redaction
+
+Submit a sample job to a running gateway:
+
+```sh
+curl -i http://localhost:4001/jobs \
+  -H 'Content-Type: application/json' \
+  -H 'X-Encore-Force-Trace-Sample: true' \
+  -d '{"id":"redaction-demo-1","payload":"example private text"}'
+```
+
+Use a new ID each time. In Trace Explorer, open the HTTP request body, then
+follow the Pub/Sub publish spans and their delivery links. The job ID stays
+visible; `payload` appears as `[REDACTED]` on the HTTP request and both topics.
+The OpenAPI schema marks the HTTP field as sensitive; the Python topic schemas
+use `Annotated[str, Sensitive()]`. Only telemetry is redacted: storage and
+subscribers still receive the original value.
+
 ## Checks
 
 Use `encore-beta` with an SDK/runtime pair supporting `encore-dev>=2.0.0b8`:

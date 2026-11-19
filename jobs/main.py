@@ -5,15 +5,24 @@ import hashlib
 import json
 import re
 
+from typing import Annotated, TypedDict
 from urllib.parse import parse_qs
 
 import encore
-from encore import EncoreError, cron, logs, metrics, pubsub
+from encore import EncoreError, Sensitive, cron, logs, metrics, pubsub
 from encore.storage import postgres, redis
+
+class JobSubmitted(TypedDict):
+    id: str
+    payload: Annotated[str, Sensitive()]
+    mode: str
+    delay_ms: int
+    log_count: int
+
 
 jobs = postgres.Database.named("jobs")
 status_cache = redis.Database("job-status")
-job_submitted = pubsub.Topic("job-submitted")
+job_submitted = pubsub.Topic[JobSubmitted]("job-submitted")
 job_completed = pubsub.Topic.named("job-completed")
 reconcile = cron.Job(
     "reconcile-jobs", path="/internal/reconcile", title="Reconcile queued jobs", every="1h",

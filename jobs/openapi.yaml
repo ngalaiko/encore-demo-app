@@ -80,7 +80,12 @@ components:
       required: [id, payload]
       properties:
         id: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
-        payload: { type: string, nullable: false, maxLength: 4096, description: At most 4096 UTF-8 bytes; empty allowed; NUL and malformed UTF-8 rejected }
+        payload:
+          type: string
+          nullable: false
+          maxLength: 4096
+          description: At most 4096 UTF-8 bytes; empty allowed; NUL and malformed UTF-8 rejected
+          x-encore: { sensitive: true }
         mode: { type: string, enum: [normal, slow, retry-once], default: normal }
         delay_ms: { type: integer, minimum: 0, maximum: 500, default: 0 }
         log_count: { type: integer, minimum: 3, maximum: 250, default: 3 }

@@ -1,13 +1,20 @@
 """API-less worker producing real SQL, retry and result-delivery traces."""
 
 from time import perf_counter
+from typing import Annotated, TypedDict
 
 import encore
-from encore import logs, metrics, pubsub, tracing
+from encore import Sensitive, logs, metrics, pubsub, tracing
 from encore.storage import postgres
 
+
+class JobCompleted(TypedDict):
+    id: str
+    payload: Annotated[str, Sensitive()]
+
+
 jobs = postgres.Database("jobs", migrations="./migrations")
-job_completed = pubsub.Topic("job-completed")
+job_completed = pubsub.Topic[JobCompleted]("job-completed")
 job_submitted = pubsub.Topic.named("job-submitted")
 job_attempts = metrics.Counter("job_attempts")
 job_retries = metrics.Counter("job_retries")
