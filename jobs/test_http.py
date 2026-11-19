@@ -65,6 +65,19 @@ def test_missing_job_field(field):
     assert request("/jobs", "POST", json.dumps(body).encode())[0] == 400
 
 
+def test_submit_publishes_job_text(monkeypatch):
+    query = Mock(return_value=SimpleNamespace(first=AsyncMock(return_value={"id": "test-1"})))
+    publish = AsyncMock()
+    monkeypatch.setattr(main, "jobs", SimpleNamespace(query=query))
+    monkeypatch.setattr(main, "job_submitted", SimpleNamespace(publish=publish))
+
+    assert request("/jobs", "POST", json.dumps(VALID).encode())[0] == 202
+    publish.assert_awaited_once_with({
+        "id": "test-1", "job_text": "hello λ", "mode": "normal",
+        "delay_ms": 0, "log_count": 3,
+    })
+
+
 def test_invalid_read_id():
     assert request("/jobs/bad id")[0] == 400
 
@@ -168,6 +181,6 @@ def test_reconcile_stale_job(monkeypatch):
 
     asyncio.run(seed())
     assert request("/internal/reconcile", "POST")[2] == {"republished": 1}
-    publish.assert_awaited_once_with({"id": "stale", "payload": "hello", "mode": "normal", "delay_ms": 0, "log_count": 3})
+    publish.assert_awaited_once_with({"id": "stale", "job_text": "hello", "mode": "normal", "delay_ms": 0, "log_count": 3})
     assert request("/internal/reconcile", "POST")[2] == {"republished": 0}
     assert publish.await_count == 1

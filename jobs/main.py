@@ -14,7 +14,7 @@ from encore.storage import postgres, redis
 
 class JobSubmitted(TypedDict):
     id: str
-    payload: Annotated[str, Sensitive()]
+    job_text: Annotated[str, Sensitive()]
     mode: str
     delay_ms: int
     log_count: int
@@ -39,7 +39,7 @@ async def confirm_completion(message: pubsub.Message[dict]):
     updated = await jobs.exec(
         """UPDATE jobs SET completion_confirmed = true
         WHERE id = $1 AND payload = $2 AND status = 'completed' AND NOT completion_confirmed""",
-        result["id"], result["payload"],
+        result["id"], result["job_text"],
     )
     if updated.rows_affected:
         logs.info("completion confirmed", job_id=result["id"], message_id=message.id)
@@ -85,7 +85,7 @@ async def reconcile_jobs():
     for _ in range(16):
         async with jobs.begin() as tx:
             job = await tx.query(
-                """SELECT id, payload, mode, delay_ms, log_count FROM jobs
+                """SELECT id, payload AS job_text, mode, delay_ms, log_count FROM jobs
                 WHERE status = 'queued'
                   AND created_at <= now() - interval '5 minutes'
                   AND (last_republished_at IS NULL OR last_republished_at <= now() - interval '1 hour')
@@ -155,7 +155,10 @@ async def handle(scope, receive):
             raise
         if admitted is None:
             return 429, {"error": "job budget exhausted"}
-        await job_submitted.publish(job)
+        await job_submitted.publish({
+            "id": job["id"], "job_text": job["payload"], "mode": job["mode"],
+            "delay_ms": job["delay_ms"], "log_count": job["log_count"],
+        })
         logs.info("job queued", job_id=job["id"], mode=job["mode"])
         return 202, {"id": job["id"]}
     if method == "GET" and path.startswith("/jobs/"):

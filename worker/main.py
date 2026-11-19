@@ -9,7 +9,7 @@ from encore.storage import postgres
 
 class JobCompleted(TypedDict):
     id: str
-    payload: Annotated[str, Sensitive()]
+    job_text: Annotated[str, Sensitive()]
 
 
 jobs = postgres.Database("jobs", migrations="./migrations")
@@ -30,7 +30,7 @@ async def process_job(message: pubsub.Message[dict]):
         async with jobs.begin() as tx:
             job = await tx.query(
                 "SELECT * FROM jobs WHERE id = $1 AND payload = $2 FOR UPDATE",
-                job_id, data["payload"],
+                job_id, data["job_text"],
             ).one()
             if job["status"] != "completed":
                 job = await tx.query(
@@ -56,9 +56,9 @@ async def process_job(message: pubsub.Message[dict]):
                             message_id=message.id,
                         )
                     await tx.exec("UPDATE jobs SET status = 'completed' WHERE id = $1", job_id)
-        # Completed redeliveries republish until the API confirms the payload.
+        # Redelivered jobs republish until the API confirms completion.
         if not job["completion_confirmed"]:
-            await job_completed.publish({"id": job_id, "payload": job["payload"]})
+            await job_completed.publish({"id": job_id, "job_text": job["payload"]})
         logs.info("job completed", job_id=job_id, attempt=job["attempts"])
 
 

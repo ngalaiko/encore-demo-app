@@ -44,8 +44,8 @@ exhausted budget returns 429. Publishing follows SQL admission; a publishing
 failure returns 500 and can leave a queued job for reconciliation.
 
 Status progresses from `queued` through `processing` to `completed`.
-`completion_confirmed` means the completion message's full payload matched the
-stored job. Public reads expose only the payload digest. Completed redeliveries
+`completion_confirmed` means the completion message's `id` and `job_text`
+matched the stored job. Public reads expose only the text digest. Completed redeliveries
 do not increment attempts and republish unconfirmed completions. Redis caches
 only confirmed completions for 60 seconds, without the original payload.
 Cache misses and Redis errors fall back to PostgreSQL. `?fail=db` bypasses Redis.
@@ -78,7 +78,8 @@ curl -i http://localhost:4001/jobs \
 
 Use a new ID each time. In Trace Explorer, open the HTTP request body, then
 follow the Pub/Sub publish spans and their delivery links. The job ID stays
-visible; `payload` appears as `[REDACTED]` on the HTTP request and both topics.
+visible. The private text appears as `[REDACTED]` under `payload` in the HTTP
+request and under `job_text` on both topics.
 The OpenAPI schema marks the HTTP field as sensitive; the Python topic schemas
 use `Annotated[str, Sensitive()]`. Only telemetry is redacted: storage and
 subscribers still receive the original value.
@@ -105,5 +106,5 @@ retry and database-error scenarios. Its normal case submits only `id` and `paylo
 
 Migration `3_job_names.up.sql` converts stored `ok`/`done` values to
 `normal`/`completed` and renames `result_received` to `completion_confirmed`.
-The renamed routes, topics and subscriptions are breaking changes; drain queued
-work before upgrading an existing environment.
+The renamed routes, topics, subscriptions and `job_text` topic field are
+breaking changes. Drain queued work before upgrading an existing environment.
