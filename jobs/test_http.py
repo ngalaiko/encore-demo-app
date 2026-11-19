@@ -1,9 +1,13 @@
-"""Public ASGI requests that do not need provisioned resources."""
+"""ASGI request tests, with on-demand infrastructure for resource tests."""
 
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+import main
 
 from main import app, read_job
 
@@ -104,3 +108,66 @@ def test_removed_routes(path, method):
 @pytest.mark.parametrize("query", [b"fail=unknown", b"fail=\xff"])
 def test_invalid_failure(query):
     assert request("/jobs/example", query=query)[0] == 400
+
+
+def test_completed_status_cache(monkeypatch):
+    row = {
+        "id": "example", "status": "completed", "attempts": 1,
+        "payload": "hello", "completion_confirmed": True,
+    }
+    query = Mock(return_value=SimpleNamespace(first=AsyncMock(side_effect=lambda: row.copy())))
+    begin = Mock()
+    begin.return_value.__aenter__ = AsyncMock(return_value=SimpleNamespace(
+        exec=AsyncMock(side_effect=main.EncoreError("database failure")),
+    ))
+    begin.return_value.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(main, "jobs", SimpleNamespace(query=query, begin=begin))
+    cache = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+    monkeypatch.setattr(main, "status_cache", SimpleNamespace(string=cache))
+
+    status, _, body = request("/jobs/example")
+    assert status == 200 and "payload" not in body
+    assert body["payload_sha256"] == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    assert cache.set.call_args.kwargs == {"ex": 60}
+
+    cache.get.return_value = cache.set.call_args.args[1]
+    assert request("/jobs/example")[2] == body
+    assert query.call_count == 1
+    assert request("/jobs/example", query=b"fail=db")[0] == 500
+    begin.assert_called_once()
+    assert cache.get.await_count == 2
+
+    cache.get.side_effect = main.EncoreError("redis unavailable")
+    cache.set.side_effect = main.EncoreError("redis unavailable")
+    assert request("/jobs/example")[2] == body
+    assert query.call_count == 2
+
+
+def test_confirmed_status_is_cached_in_redis():
+    asyncio.run(main.jobs.exec(
+        """INSERT INTO jobs (id, payload, mode, delay_ms, log_count, status, attempts, completion_confirmed)
+        VALUES ('confirmed', 'hello', 'normal', 0, 3, 'completed', 1, true)""",
+    ))
+    status, _, body = request("/jobs/confirmed")
+    assert status == 200
+    cached = asyncio.run(main.status_cache.string.get("job:v1:confirmed"))
+    assert cached is not None and json.loads(cached) == body
+    assert "payload" not in body
+
+
+def test_reconcile_stale_job(monkeypatch):
+    publish = AsyncMock()
+    monkeypatch.setattr(main, "job_submitted", SimpleNamespace(publish=publish))
+
+    async def seed():
+        await main.jobs.exec(
+            """INSERT INTO jobs (id, payload, mode, delay_ms, log_count, created_at)
+            VALUES ('stale', 'hello', 'normal', 0, 3, now() - interval '10 minutes'),
+                   ('fresh', 'hello', 'normal', 0, 3, now())""",
+        )
+
+    asyncio.run(seed())
+    assert request("/internal/reconcile", "POST")[2] == {"republished": 1}
+    publish.assert_awaited_once_with({"id": "stale", "payload": "hello", "mode": "normal", "delay_ms": 0, "log_count": 3})
+    assert request("/internal/reconcile", "POST")[2] == {"republished": 0}
+    assert publish.await_count == 1

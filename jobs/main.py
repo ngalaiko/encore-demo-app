@@ -8,12 +8,19 @@ import re
 from urllib.parse import parse_qs
 
 import encore
-from encore import logs, pubsub
-from encore.storage import postgres
+from encore import EncoreError, cron, logs, metrics, pubsub
+from encore.storage import postgres, redis
 
 jobs = postgres.Database.named("jobs")
+status_cache = redis.Database("job-status")
 job_submitted = pubsub.Topic("job-submitted")
 job_completed = pubsub.Topic.named("job-completed")
+reconcile = cron.Job(
+    "reconcile-jobs", path="/internal/reconcile", title="Reconcile queued jobs", every="1h",
+)
+status_cache_hits = metrics.Counter("status_cache_hits")
+status_cache_misses = metrics.Counter("status_cache_misses")
+jobs_republished = metrics.Counter("jobs_republished")
 
 ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
@@ -64,10 +71,59 @@ async def read_job(receive):
     return job
 
 
+async def reconcile_jobs():
+    republished = 0
+    for _ in range(16):
+        async with jobs.begin() as tx:
+            job = await tx.query(
+                """SELECT id, payload, mode, delay_ms, log_count FROM jobs
+                WHERE status = 'queued'
+                  AND created_at <= now() - interval '5 minutes'
+                  AND (last_republished_at IS NULL OR last_republished_at <= now() - interval '1 hour')
+                ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED""",
+            ).first()
+            if job is None:
+                break
+            await job_submitted.publish(job)
+            await tx.exec("UPDATE jobs SET last_republished_at = now() WHERE id = $1", job["id"])
+        republished += 1
+        jobs_republished.increment()
+        logs.info("job republished", job_id=job["id"])
+    return republished
+
+
+async def get_job(job_id):
+    key = f"job:v1:{job_id}"
+    try:
+        cached = await status_cache.string.get(key)
+        if cached is not None:
+            value = json.loads(cached)
+            status_cache_hits.increment()
+            return value
+    except (EncoreError, ValueError):
+        logs.warning("job status cache read failed", job_id=job_id)
+    status_cache_misses.increment()
+
+    job = await jobs.query(
+        "SELECT id, status, attempts, payload, completion_confirmed FROM jobs WHERE id = $1", job_id,
+    ).first()
+    if job is None:
+        return None
+    job["payload_sha256"] = hashlib.sha256(job.pop("payload").encode("utf-8")).hexdigest()
+    if job["status"] == "completed" and job["completion_confirmed"]:
+        try:
+            await status_cache.string.set(key, json.dumps(job).encode(), ex=60)
+        except EncoreError:
+            logs.warning("job status cache write failed", job_id=job_id)
+    return job
+
+
 async def handle(scope, receive):
     method, path = scope["method"], scope["path"]
     if method == "GET" and path == "/healthz":
         return 204, None
+    if method == "POST" and path == "/internal/reconcile":
+        return 200, {"republished": await reconcile_jobs()}
 
     if method == "POST" and path == "/jobs":
         try:
@@ -106,12 +162,9 @@ async def handle(scope, receive):
         if failure == "db":
             async with jobs.begin() as tx:
                 await tx.exec("SELECT 1 / 0")
-        job = await jobs.query(
-            "SELECT id, status, attempts, payload, completion_confirmed FROM jobs WHERE id = $1", job_id,
-        ).first()
+        job = await get_job(job_id)
         if job is None:
             return 404, {"error": "job not found"}
-        job["payload_sha256"] = hashlib.sha256(job.pop("payload").encode("utf-8")).hexdigest()
         return 200, job
     return 404, {"error": "not found"}
 

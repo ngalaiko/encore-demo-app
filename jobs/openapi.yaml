@@ -50,6 +50,21 @@ paths:
         '400': { description: Invalid ID or failure option }
         '404': { description: Job not found }
         '500': { description: Internal error or deliberate database failure }
+  /internal/reconcile:
+    post:
+      operationId: reconcileJobs
+      summary: Republish stale queued jobs
+      responses:
+        '200':
+          description: Reconciliation finished
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [republished]
+                properties:
+                  republished: { type: integer, minimum: 0, maximum: 16 }
+        '500': { description: Reconciliation failed }
 components:
   schemas:
     Identity:

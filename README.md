@@ -6,7 +6,7 @@ generate traces, contextual logs and database activity.
 
 ## Structure
 
-- `jobs`: HTTP endpoints; publishes `job-submitted`, consumes `job-completed`.
+- `jobs`: HTTP, Redis status cache, and reconciliation cron; publishes `job-submitted` and consumes `job-completed`.
 - `worker`: consumes `job-submitted`; owns PostgreSQL `jobs` and `job-completed`.
 - `gateway`: default public gateway `api`, required by the exposed routes.
 
@@ -41,15 +41,30 @@ IDs use 1–64 letters, digits, `_` or `-`. JSON is limited to 16KiB; payload to
 4096 UTF-8 bytes without NUL; delay to 0–500ms; log count to 3–250.
 Each environment admits 128 jobs, without refill. Duplicates return 409;
 exhausted budget returns 429. Publishing follows SQL admission; a publishing
-failure returns 500 and can leave a queued job.
+failure returns 500 and can leave a queued job for reconciliation.
 
 Status progresses from `queued` through `processing` to `completed`.
 `completion_confirmed` means the completion message's full payload matched the
 stored job. Public reads expose only the payload digest. Completed redeliveries
-do not increment attempts and republish unconfirmed completions.
+do not increment attempts and republish unconfirmed completions. Redis caches
+only confirmed completions for 60 seconds, without the original payload.
+Cache misses and Redis errors fall back to PostgreSQL. `?fail=db` bypasses Redis.
+
+The hourly `reconcile-jobs` cron calls private `POST /internal/reconcile`.
+It republishes up to 16 jobs queued for at least five minutes, with a one-hour
+cooldown per republished job. It does not admit new jobs or spend the budget.
+Publication is at-least-once. Locally, cron is not scheduled; use
+`encore-beta cron trigger reconcile-jobs` with a CLI that supports cron.
 
 The worker emits `log_count` contextual logs inside a `process_job` span, including
 false, zero, empty-string and large-integer attributes.
+
+Custom metrics include `worker.job_attempts`, `worker.job_retries` (deliberate
+retry failures), `worker.job_processing_duration` (seconds for a completed
+processing pass), `jobs.status_cache_hits`, `jobs.status_cache_misses`, and
+`jobs.jobs_republished`. After a local `retry-once` run, inspect them with
+`encore-beta metrics get worker.job_attempts --since 5m` and
+`encore-beta metrics get worker.job_retries --since 5m`.
 
 ## Checks
 
@@ -67,7 +82,7 @@ Against a running app's gateway:
 python3 tests/e2e.py --base-url http://localhost:4001 --all-cases
 ```
 
-The HTTP tests cover health, validation, defaults and removed routes.
+The HTTP tests cover health, validation, defaults, cache fallback, and PostgreSQL-backed cron reconciliation.
 The end-to-end test checks SQL and Pub/Sub completion; `--all-cases` adds slow,
 retry and database-error scenarios. Its normal case submits only `id` and `payload`.
 
