@@ -60,8 +60,7 @@ The worker emits `log_count` contextual logs inside a `process_job` span, includ
 false, zero, empty-string and large-integer attributes.
 
 Custom metrics include `worker.job_attempts`, `worker.job_retries` (deliberate
-retry failures), `worker.job_processing_duration` (seconds for a completed
-processing pass), `jobs.status_cache_hits`, `jobs.status_cache_misses`, and
+retry failures), `jobs.status_cache_hits`, `jobs.status_cache_misses`, and
 `jobs.jobs_republished`. After a local `retry-once` run, inspect them with
 `encore-beta metrics get worker.job_attempts --since 5m` and
 `encore-beta metrics get worker.job_retries --since 5m`.

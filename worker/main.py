@@ -1,6 +1,5 @@
 """API-less worker producing real SQL, retry and result-delivery traces."""
 
-from time import perf_counter
 from typing import Annotated, TypedDict
 
 import encore
@@ -18,15 +17,11 @@ job_completed = pubsub.Topic[JobCompleted]("job-completed")
 job_submitted = pubsub.Topic.named("job-submitted")
 job_attempts = metrics.Counter("job_attempts")
 job_retries = metrics.Counter("job_retries")
-job_processing_duration = metrics.Histogram(
-    "job_processing_duration", unit="s", buckets=[0.001, 0.01, 0.1, 0.5, 1.0],
-)
 
 
 async def process_job(message: pubsub.Message[dict]):
     data = message.data
     job_id = data["id"]
-    started = perf_counter()
     with tracing.span("process_job", attributes={
         "job.id": job_id, "test.flag": False, "test.zero": 0,
         "test.empty": "", "test.int64": 9007199254740993,
@@ -61,8 +56,6 @@ async def process_job(message: pubsub.Message[dict]):
                             message_id=message.id,
                         )
                     await tx.exec("UPDATE jobs SET status = 'completed' WHERE id = $1", job_id)
-            if job["status"] != "completed":
-                job_processing_duration.record(perf_counter() - started)
         # Completed redeliveries republish until the API confirms the payload.
         if not job["completion_confirmed"]:
             await job_completed.publish({"id": job_id, "payload": job["payload"]})
