@@ -2,7 +2,7 @@
 
 This is the original comparison. Custom metrics, Redis, and cron are now implemented; see the [README](../README.md).
 
-The demo already has a public OpenAPI gateway, PostgreSQL, two Pub/Sub topics and two subscriptions, custom spans, and contextual logs ([jobs](../jobs/main.py), [worker](../worker/main.py), [gateway](../gateway/encore.gateway.json)). [`demo.check`](../demo.check) only calls `/healthz`; [`tests/e2e.py`](../tests/e2e.py) checks completion, payload integrity, retry attempts, and recovery after a SQL error. The v2 check runner scores each curl by exit code, not response semantics ([check.rs](../../../encoredev/v2-encore/crates/encore_cli/src/daemon/check.rs#L304)).
+The demo already has a public OpenAPI gateway, PostgreSQL, two Pub/Sub topics and two subscriptions, custom spans, and contextual logs ([jobs](../jobs/main.py), [worker](../worker/main.py), [gateway](../gateway/encore.gateway.json)). [`demo.check`](../demo.check) only calls `/healthz`; [`tests/e2e.py`](../tests/e2e.py) checks the public text-analysis round trip. The v2 check runner scores each curl by exit code, not response semantics ([check.rs](../../../encoredev/v2-encore/crates/encore_cli/src/daemon/check.rs#L304)).
 
 | Missing | Demo scenario and assertion | v2 source |
 | --- | --- | --- |

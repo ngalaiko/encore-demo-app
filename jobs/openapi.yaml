@@ -1,6 +1,6 @@
 openapi: 3.0.3
 info:
-  title: Encore demo app
+  title: Text analysis demo
   version: 1.0.0
 paths:
   /healthz:
@@ -25,7 +25,6 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Identity' }
         '400': { description: Invalid job or JSON; body limited to 16KiB }
-        '409': { description: Job ID already exists }
         '429': { description: Environment admission budget exhausted (128 jobs; no refill) }
         '500': { description: Internal error; a committed job may remain queued if publishing fails }
   /jobs/{id}:
@@ -37,19 +36,39 @@ paths:
           name: id
           required: true
           schema: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
-        - in: query
-          name: fail
-          description: Deliberately fail a database transaction for observability testing.
-          schema: { type: string, enum: [db] }
       responses:
         '200':
-          description: Durable job state
+          description: Job status and, when completed, its analysis result
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Job' }
-        '400': { description: Invalid ID or failure option }
+        '400': { description: Invalid ID }
         '404': { description: Job not found }
-        '500': { description: Internal error or deliberate database failure }
+        '500': { description: Internal error }
+  /internal/demo/jobs:
+    post:
+      operationId: submitDemoJob
+      summary: Submit an analysis with demo controls
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SubmitDemoJob' }
+      responses:
+        '202':
+          description: Job stored and submission published
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Identity' }
+        '400': { description: Invalid submission }
+        '429': { description: Environment admission budget exhausted }
+        '500': { description: Internal error }
+  /internal/demo/database-error:
+    post:
+      operationId: demoDatabaseError
+      summary: Deliberately fail a database transaction
+      responses:
+        '500': { description: Deliberate database failure }
   /internal/reconcile:
     post:
       operationId: reconcileJobs
@@ -75,27 +94,40 @@ components:
         id: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
     SubmitJob:
       type: object
-      description: Only id and payload are required. Optional fields are non-null and use defaults when omitted. Slow mode runs pg_sleep; retry-once fails its first durable attempt.
       additionalProperties: false
-      required: [id, payload]
+      required: [text]
       properties:
-        id: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
-        payload:
-          type: string
-          nullable: false
-          maxLength: 4096
-          description: At most 4096 UTF-8 bytes; empty allowed; NUL and malformed UTF-8 rejected
-          x-encore: { sensitive: true }
+        text: { $ref: '#/components/schemas/AnalysisText' }
+    SubmitDemoJob:
+      type: object
+      description: Slow mode runs pg_sleep; retry-once fails its first durable attempt.
+      additionalProperties: false
+      required: [text]
+      properties:
+        text: { $ref: '#/components/schemas/AnalysisText' }
         mode: { type: string, enum: [normal, slow, retry-once], default: normal }
         delay_ms: { type: integer, minimum: 0, maximum: 500, default: 0 }
         log_count: { type: integer, minimum: 3, maximum: 250, default: 3 }
+    AnalysisText:
+      type: string
+      maxLength: 4096
+      description: At most 4096 UTF-8 bytes; empty allowed; NUL and malformed UTF-8 rejected
+      x-encore: { sensitive: true }
     Job:
       type: object
-      required: [id, status, attempts, completion_confirmed, payload_sha256]
+      required: [id, status]
       additionalProperties: false
       properties:
-        id: { type: string }
+        id: { type: string, pattern: '^[A-Za-z0-9_-]{1,64}$' }
         status: { type: string, enum: [queued, processing, completed] }
-        attempts: { type: integer, minimum: 0 }
-        completion_confirmed: { type: boolean }
-        payload_sha256: { type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the stored payload UTF-8 bytes }
+        result: { $ref: '#/components/schemas/AnalysisResult' }
+    AnalysisResult:
+      type: object
+      description: Present only when the job is completed.
+      required: [word_count]
+      additionalProperties: false
+      properties:
+        word_count:
+          type: integer
+          minimum: 0
+          description: Number of non-empty runs separated by Unicode whitespace.

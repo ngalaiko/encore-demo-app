@@ -1,12 +1,9 @@
 """Job submission and completion confirmation over SQL and Pub/Sub."""
 
-import hashlib
-
 import json
 import re
-
+import uuid
 from typing import Annotated, TypedDict
-from urllib.parse import parse_qs
 
 import encore
 from encore import EncoreError, Sensitive, cron, logs, metrics, pubsub
@@ -38,8 +35,9 @@ async def confirm_completion(message: pubsub.Message[dict]):
     result = message.data
     updated = await jobs.exec(
         """UPDATE jobs SET completion_confirmed = true
-        WHERE id = $1 AND payload = $2 AND status = 'completed' AND NOT completion_confirmed""",
-        result["id"], result["job_text"],
+        WHERE id = $1 AND input_text = $2 AND word_count = $3
+          AND status = 'completed' AND NOT completion_confirmed""",
+        result["id"], result["job_text"], result["word_count"],
     )
     if updated.rows_affected:
         logs.info("completion confirmed", job_id=result["id"], message_id=message.id)
@@ -51,7 +49,7 @@ completion_subscription = pubsub.Subscription[dict](
 )
 
 
-async def read_job(receive):
+async def read_submission(receive, *, demo=False):
     body = bytearray()
     while True:
         chunk = await receive()
@@ -62,21 +60,21 @@ async def read_job(receive):
             raise ValueError("body too large")
         if not chunk.get("more_body", False):
             break
-    job = json.loads(body.decode("utf-8"))
-    if isinstance(job, dict):
-        job = {"mode": "normal", "delay_ms": 0, "log_count": 3, **job}
+    submission = json.loads(body.decode("utf-8"))
+    options = {"mode": "normal", "delay_ms": 0, "log_count": 3}
+    allowed_fields = {"text", *options} if demo else {"text"}
+    if not isinstance(submission, dict) or submission.keys() - allowed_fields:
+        raise ValueError("invalid submission")
+    text = submission.get("text")
+    if not isinstance(text, str) or len(text.encode("utf-8")) > 4096 or "\x00" in text:
+        raise ValueError("invalid text")
+    job = {**options, **submission}
     if not (
-        isinstance(job, dict)
-        and set(job) == {"id", "payload", "mode", "delay_ms", "log_count"}
-        and isinstance(job["id"], str) and ID.fullmatch(job["id"])
-        and isinstance(job["payload"], str)
-        and len(job["payload"].encode("utf-8")) <= 4096
-        and "\x00" not in job["payload"]
-        and job["mode"] in ("normal", "slow", "retry-once")
+        job["mode"] in ("normal", "slow", "retry-once")
         and type(job["delay_ms"]) is int and 0 <= job["delay_ms"] <= 500
         and type(job["log_count"]) is int and 3 <= job["log_count"] <= 250
     ):
-        raise ValueError("invalid job")
+        raise ValueError("invalid demo options")
     return job
 
 
@@ -85,7 +83,7 @@ async def reconcile_jobs():
     for _ in range(16):
         async with jobs.begin() as tx:
             job = await tx.query(
-                """SELECT id, payload AS job_text, mode, delay_ms, log_count FROM jobs
+                """SELECT id, input_text AS job_text, mode, delay_ms, log_count FROM jobs
                 WHERE status = 'queued'
                   AND created_at <= now() - interval '5 minutes'
                   AND (last_republished_at IS NULL OR last_republished_at <= now() - interval '1 hour')
@@ -102,7 +100,7 @@ async def reconcile_jobs():
 
 
 async def get_job(job_id):
-    key = f"job:v1:{job_id}"
+    key = f"job:v2:{job_id}"
     try:
         cached = await status_cache.string.get(key)
         if cached is not None:
@@ -113,13 +111,15 @@ async def get_job(job_id):
         logs.warning("job status cache read failed", job_id=job_id)
     status_cache_misses.increment()
 
-    job = await jobs.query(
-        "SELECT id, status, attempts, payload, completion_confirmed FROM jobs WHERE id = $1", job_id,
+    row = await jobs.query(
+        "SELECT id, status, word_count, completion_confirmed FROM jobs WHERE id = $1", job_id,
     ).first()
-    if job is None:
+    if row is None:
         return None
-    job["payload_sha256"] = hashlib.sha256(job.pop("payload").encode("utf-8")).hexdigest()
-    if job["status"] == "completed" and job["completion_confirmed"]:
+    job = {"id": row["id"], "status": row["status"]}
+    if row["status"] == "completed":
+        job["result"] = {"word_count": row["word_count"]}
+    if row["status"] == "completed" and row["completion_confirmed"]:
         try:
             await status_cache.string.set(key, json.dumps(job).encode(), ex=60)
         except EncoreError:
@@ -134,46 +134,37 @@ async def handle(scope, receive):
     if method == "POST" and path == "/internal/reconcile":
         return 200, {"republished": await reconcile_jobs()}
 
-    if method == "POST" and path == "/jobs":
+    if method == "POST" and path == "/internal/demo/database-error":
+        async with jobs.begin() as tx:
+            await tx.exec("SELECT 1 / 0")
+
+    if method == "POST" and path in ("/jobs", "/internal/demo/jobs"):
         try:
-            job = await read_job(receive)
-        except (ValueError, UnicodeError):
-            return 400, {"error": "invalid job"}
-        try:
-            admitted = await jobs.query(
-                """WITH budget AS (
-                    UPDATE admission_budget SET remaining = remaining - 1
-                    WHERE id = 1 AND remaining > 0 RETURNING id
-                )
-                INSERT INTO jobs (id, payload, mode, delay_ms, log_count)
-                SELECT $1, $2, $3, $4, $5 FROM budget RETURNING id""",
-                job["id"], job["payload"], job["mode"], job["delay_ms"], job["log_count"],
-            ).first()
-        except postgres.DatabaseError as error:
-            if error.code == postgres.ErrorCode.UNIQUE_VIOLATION:
-                return 409, {"error": "job already exists"}
-            raise
+            job = await read_submission(receive, demo=path == "/internal/demo/jobs")
+        except ValueError:
+            return 400, {"error": "invalid submission"}
+        job_id = uuid.uuid4().hex
+        admitted = await jobs.query(
+            """WITH budget AS (
+                UPDATE admission_budget SET remaining = remaining - 1
+                WHERE id = 1 AND remaining > 0 RETURNING id
+            )
+            INSERT INTO jobs (id, input_text, mode, delay_ms, log_count)
+            SELECT $1, $2, $3, $4, $5 FROM budget RETURNING id""",
+            job_id, job["text"], job["mode"], job["delay_ms"], job["log_count"],
+        ).first()
         if admitted is None:
             return 429, {"error": "job budget exhausted"}
         await job_submitted.publish({
-            "id": job["id"], "job_text": job["payload"], "mode": job["mode"],
+            "id": job_id, "job_text": job["text"], "mode": job["mode"],
             "delay_ms": job["delay_ms"], "log_count": job["log_count"],
         })
-        logs.info("job queued", job_id=job["id"], mode=job["mode"])
-        return 202, {"id": job["id"]}
+        logs.info("job queued", job_id=job_id, mode=job["mode"])
+        return 202, {"id": job_id}
     if method == "GET" and path.startswith("/jobs/"):
         job_id = path.removeprefix("/jobs/")
         if not ID.fullmatch(job_id):
             return 400, {"error": "invalid id"}
-        try:
-            failure = parse_qs(scope.get("query_string", b"").decode("utf-8")).get("fail", [""])[0]
-        except UnicodeError:
-            return 400, {"error": "invalid fail"}
-        if failure not in ("", "db"):
-            return 400, {"error": "invalid fail"}
-        if failure == "db":
-            async with jobs.begin() as tx:
-                await tx.exec("SELECT 1 / 0")
         job = await get_job(job_id)
         if job is None:
             return 404, {"error": "job not found"}

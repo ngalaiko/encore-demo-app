@@ -1,110 +1,87 @@
-# Encore demo app
+# Encore text analysis demo
 
-A Python background job demo built with Encore. Submit a job, process it through
-Pub/Sub and PostgreSQL, then inspect its status. Normal, slow and retry scenarios
-generate traces, contextual logs and database activity.
+Submit private text for background analysis and poll for its word count. The
+Python services exercise Encore's HTTP gateway, Pub/Sub, PostgreSQL, Redis, cron,
+and tracing.
 
-## Structure
+## Public API
 
-- `jobs`: HTTP, Redis status cache, and reconciliation cron; publishes `job-submitted` and consumes `job-completed`.
-- `worker`: consumes `job-submitted`; owns PostgreSQL `jobs` and `job-completed`.
-- `gateway`: default public gateway `api`, required by the exposed routes.
-
-Subscriptions are `process-job` and `confirm-completion`. Both Python modules
-use `main.py` as their entrypoint. The worker has an internal readiness listener
-but no public endpoints.
-
-## Routes
-
-| Method | Path | Purpose |
+| Method | Path | Response |
 | --- | --- | --- |
-| GET | `/healthz` | Health check; returns 204 |
+| GET | `/healthz` | 204 |
+| POST | `/jobs` | 202 with a server-generated job ID |
+| GET | `/jobs/{id}` | Job status and, once completed, its result |
 
-| POST | `/jobs` | Store and publish a job; returns 202 with its ID |
-| GET | `/jobs/{id}` | Status, attempts, payload SHA-256 and completion confirmation |
-| GET | `/jobs/{id}?fail=db` | Deliberate SQL division by zero; rollback and 500 |
-
-Minimal job:
+Submit `{"text":"example private text"}`, then poll using the returned ID.
+A completed response looks like:
 
 ```json
-{"id":"example-1","payload":"hello"}
+{"id":"88f43c9c9f704457952716093c13efe8a","status":"completed","result":{"word_count":3}}
 ```
 
-Optional fields default to `mode: "normal"`, `delay_ms: 0` and `log_count: 3`.
-Explicit nulls and unknown fields are rejected.
+Queued and processing jobs omit `result`. A word is a run of characters
+separated by Unicode whitespace; punctuation does not split words. Empty or
+whitespace-only text yields zero. Text is limited to 4096 UTF-8 bytes without
+NUL, and the JSON request is limited to 16KiB. Responses never include the
+original text.
 
-- `normal`: complete normally.
-- `slow`: run `pg_sleep` for `delay_ms`.
-- `retry-once`: fail after committing the first attempt, then complete on retry.
+Each environment admits 128 jobs without refill, then returns 429. A publish
+failure can leave an admitted job queued for reconciliation.
 
-IDs use 1–64 letters, digits, `_` or `-`. JSON is limited to 16KiB; payload to
-4096 UTF-8 bytes without NUL; delay to 0–500ms; log count to 3–250.
-Each environment admits 128 jobs, without refill. Duplicates return 409;
-exhausted budget returns 429. Publishing follows SQL admission; a publishing
-failure returns 500 and can leave a queued job for reconciliation.
+## Processing and demo controls
 
-Status progresses from `queued` through `processing` to `completed`.
-`completion_confirmed` means the completion message's `id` and `job_text`
-matched the stored job. Public reads expose only the text digest. Completed redeliveries
-do not increment attempts and republish unconfirmed completions. Redis caches
-only confirmed completions for 60 seconds, without the original payload.
-Cache misses and Redis errors fall back to PostgreSQL. `?fail=db` bypasses Redis.
+The `jobs` service publishes `job-submitted`; the `worker` service consumes
+it through `process-job` and stores the result in PostgreSQL. The worker
+publishes `job-completed` until `confirm-completion` confirms the result.
+Redis caches only confirmed results for 60 seconds. Cache misses and Redis
+errors fall back to PostgreSQL.
 
-The hourly `reconcile-jobs` cron calls private `POST /internal/reconcile`.
+The hourly `reconcile-jobs` cron invokes private `POST /internal/reconcile`.
 It republishes up to 16 jobs queued for at least five minutes, with a one-hour
-cooldown per republished job. It does not admit new jobs or spend the budget.
-Publication is at-least-once. Locally, cron is not scheduled; use
-`encore-beta cron trigger reconcile-jobs` with a CLI that supports cron.
+cooldown. Local cron is not scheduled; use `encore-beta cron trigger reconcile-jobs`
+with a CLI that supports cron.
 
-The worker emits `log_count` contextual logs inside a `process_job` span, including
-false, zero, empty-string and large-integer attributes.
+Private `POST /internal/demo/jobs` accepts `text` and optional controls:
 
-Custom metrics include `worker.job_attempts`, `worker.job_retries` (deliberate
-retry failures), `jobs.status_cache_hits`, `jobs.status_cache_misses`, and
-`jobs.jobs_republished`. After a local `retry-once` run, inspect them with
-`encore-beta metrics get worker.job_attempts --since 5m` and
-`encore-beta metrics get worker.job_retries --since 5m`.
+- `mode`: `normal` (default), `slow` (runs `pg_sleep`), or `retry-once` (fails after committing the first attempt).
+- `delay_ms`: 0–500, default 0.
+- `log_count`: 3–250, default 3.
+
+Private `POST /internal/demo/database-error` runs a failing SQL transaction.
+Neither route is exposed at the public gateway.
+
+The worker emits contextual logs in a `process_job` span. Inspect
+`worker.job_attempts`, `worker.job_retries`, `jobs.status_cache_hits`,
+`jobs.status_cache_misses`, and `jobs.jobs_republished` with
+`encore-beta metrics get <name> --since 5m`.
 
 ## Trace redaction
-
-Submit a sample job to a running gateway:
 
 ```sh
 curl -i http://localhost:4001/jobs \
   -H 'Content-Type: application/json' \
   -H 'X-Encore-Force-Trace-Sample: true' \
-  -d '{"id":"redaction-demo-1","payload":"example private text"}'
+  -d '{"text":"example private text"}'
 ```
 
-Use a new ID each time. In Trace Explorer, open the HTTP request body, then
-follow the Pub/Sub publish spans and their delivery links. The job ID stays
-visible. The private text appears as `[REDACTED]` under `payload` in the HTTP
-request and under `job_text` on both topics.
-The OpenAPI schema marks the HTTP field as sensitive; the Python topic schemas
-use `Annotated[str, Sensitive()]`. Only telemetry is redacted: storage and
-subscribers still receive the original value.
+In Trace Explorer, follow the request body and Pub/Sub delivery links.
+The HTTP `text` field and both topics' `job_text` fields appear as
+`[REDACTED]`. The job ID and result stay visible. Storage and subscribers
+still receive the original text.
 
 ## Checks
 
-Use `encore-beta` with an SDK/runtime pair supporting `encore-dev>=2.0.0b8`:
+Use a matching Encore SDK and runtime supporting `encore-dev>=2.0.0b8`:
 
 ```sh
 encore-beta test uv run --project jobs python -m pytest jobs/test_http.py -q
-encore-beta test uv run --project worker python -m pytest worker/test_health.py -q
+encore-beta test uv run --project worker python -m pytest worker -q
 encore-beta check < demo.check
+python3 tests/e2e.py --base-url http://localhost:4001
 ```
 
-Against a running app's gateway:
+## Upgrading
 
-```sh
-python3 tests/e2e.py --base-url http://localhost:4001 --all-cases
-```
-
-The HTTP tests cover health, validation, defaults, cache fallback, and PostgreSQL-backed cron reconciliation.
-The end-to-end test checks SQL and Pub/Sub completion; `--all-cases` adds slow,
-retry and database-error scenarios. Its normal case submits only `id` and `payload`.
-
-Migration `3_job_names.up.sql` converts stored `ok`/`done` values to
-`normal`/`completed` and renames `result_received` to `completion_confirmed`.
-The renamed routes, topics, subscriptions and `job_text` topic field are
-breaking changes. Drain queued work before upgrading an existing environment.
+The public request and response schemas and the completion message changed.
+Drain queued and in-flight messages before upgrading. Migration
+`5_text_analysis.up.sql` retains job IDs and backfills completed results.

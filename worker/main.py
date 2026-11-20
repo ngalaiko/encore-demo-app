@@ -10,6 +10,7 @@ from encore.storage import postgres
 class JobCompleted(TypedDict):
     id: str
     job_text: Annotated[str, Sensitive()]
+    word_count: int
 
 
 jobs = postgres.Database("jobs", migrations="./migrations")
@@ -29,7 +30,7 @@ async def process_job(message: pubsub.Message[dict]):
         # Commit the attempt before a deliberate retry can fail the delivery.
         async with jobs.begin() as tx:
             job = await tx.query(
-                "SELECT * FROM jobs WHERE id = $1 AND payload = $2 FOR UPDATE",
+                "SELECT * FROM jobs WHERE id = $1 AND input_text = $2 FOR UPDATE",
                 job_id, data["job_text"],
             ).one()
             if job["status"] != "completed":
@@ -55,10 +56,15 @@ async def process_job(message: pubsub.Message[dict]):
                             attempt=job["attempts"], step=index + 1, total=job["log_count"],
                             message_id=message.id,
                         )
-                    await tx.exec("UPDATE jobs SET status = 'completed' WHERE id = $1", job_id)
+                    job = await tx.query(
+                        """UPDATE jobs SET status = 'completed', word_count = count_words(input_text)
+                        WHERE id = $1 RETURNING *""", job_id,
+                    ).one()
         # Redelivered jobs republish until the API confirms completion.
         if not job["completion_confirmed"]:
-            await job_completed.publish({"id": job_id, "job_text": job["payload"]})
+            await job_completed.publish({
+                "id": job_id, "job_text": job["input_text"], "word_count": job["word_count"],
+            })
         logs.info("job completed", job_id=job_id, attempt=job["attempts"])
 
 
